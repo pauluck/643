@@ -1,0 +1,157 @@
+---
+title: "DATA 643 Recommender System"
+author: "Puneet Auluck"
+date: "February 13, 2017"
+output: html_document
+---
+
+This recommender system will use MovieLense data from `recommenderlab` package.  This system will recommend top 5 movies to randomly selected users using `item-based collaborative filtering`.
+
+
+```{r, echo=FALSE}
+library(recommenderlab)
+library(dplyr)
+library(lsa)
+library(knitr)
+```
+
+### Load data
+
+```{r}
+data("MovieLense")
+movies <- as.matrix(MovieLense@data)
+
+dim(movies)
+
+```
+
+This data contains 943 users with ratings on 1664 movies.
+
+### Normalize data
+
+The dataset will be normalized taking standard score using universal mean.
+
+```{r}
+movies[movies==0] <- NA
+mmean <- mean(movies, na.rm = T)
+msd <- sd(movies, na.rm=T)
+moviesnorm <- (movies - mmean)/msd
+
+```
+
+### Generate similarity matrix 
+
+We will be generating similarity matrix based on similarities between items.
+
+```{r}
+library(lsa)
+movietemp <- movies
+movietemp[is.na(movietemp)] = 0
+movie_sim_mtx = cosine(as.matrix(movietemp))
+
+#image(as.matrix(movie_sim_mtx))
+#library(corrplot)
+#corrplot(as.matrix(movie_sim_mtx), is.corr = FALSE, method = "color")
+```
+
+### Create function to return top 5 recommendations for a user
+
+Populate all `na` values for a user 
+
+```{r}
+
+getTopFive <- function(u){
+  
+  # get all normalized ratings for this user
+  user_ratings <- moviesnorm[u,]
+
+  # get list of movies user did not rate
+  movies_user_not_rated <- which(is.na(user_ratings))
+
+  # get list of movies user rated
+  movies_user_rated <- which(!is.na(user_ratings))
+  
+  # list of movie names 
+  movie_names <- names(user_ratings)
+  
+  # list to store predicted values for not rated moves
+  now_rated_value <- list()
+  now_rated_name <- list()
+
+  # calculated weighted similarity for non related
+  for(i in 1:length(movies_user_not_rated)){
+    # get column from similarity matrix
+    movie_item_simlarity = movie_sim_mtx[i,]
+    
+    # calculate weight and weight average
+    weight_total = sum(movie_item_simlarity[unlist(movies_user_rated)])
+    weighted <- movie_item_simlarity * moviesnorm[1,]
+    
+    # store the movie rating and its name
+    now_rated_value[i] <- sum(weighted,na.rm=T)/weight_total
+    now_rated_name[i] <- movie_names[movies_user_not_rated[i]]
+  }
+
+  # return top five recommended values
+  now_rated_df <- cbind.data.frame("m"=unlist(now_rated_name),
+                                   "v"=unlist(now_rated_value), 
+                                   stringsAsFactors = FALSE)
+  now_rated_sorted_df <- now_rated_df[order(-now_rated_df$v),] 
+  rv <- head(now_rated_sorted_df$m,n=5)
+
+  return(rv)
+}
+
+
+```
+
+### Randomly pick 10 users to display their top 5 movie picks
+
+```{r}
+# Print out top 5 recommendations for 10 users
+recommends <- data.frame(matrix(nrow=10,ncol=6))
+names(recommends) <- c("User","Top1","Top3","Top3","Top4","Top5")
+
+# randomly pick 10 users
+set.seed(123)
+users <- sample(1:nrow(moviesnorm),10, replace = FALSE)
+
+for(i in c(1:length(users))){
+  top5 <- getTopFive(users[i])
+  recommends[i,] <- c(users[i],as.list(top5))
+}
+
+# print out the recommendations
+kable(recommends)
+```
+
+
+### Recommendation system with built in system
+
+```{r}
+# collect movie names and its index
+movie_names <- colnames(movies)
+
+# run recommenderlab builtin function
+recsys <- Recommender(data = MovieLense, method = "IBCF", parameter = list(method = "Cosine"))
+recsysTop5 <- predict(object = recsys, newdata = MovieLense, n = 5)
+top5items <- recsysTop5@items
+
+# get top 5 movie names
+top5builtin <- movie_names[unlist(top5items[22])]
+
+# Print out top 5 recommendations for 10 users
+recommends_builtin <- data.frame(matrix(nrow=10,ncol=6))
+names(recommends_builtin) <- c("User","Top1","Top3","Top3","Top4","Top5")
+
+for(i in c(1:length(users))){
+  top5 <- movie_names[unlist(top5items[users[i]])]
+  recommends_builtin[i,] <- c(users[i],as.list(top5))
+}
+
+kable(recommends_builtin)
+```
+
+From running my own recommender algorithm and built-in, the built-in processes the feed much faster.  Unfortunately, the outputs from both systems do not match which tells me that should improve on the system I have created.
+
+***
