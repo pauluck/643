@@ -1,0 +1,194 @@
+---
+title: 'DATA 643 Project #2'
+author: "Puneet Auluck"
+date: "February 27, 2017"
+output:
+  html_document: default
+  word_document: default
+---
+
+# Content Management and Collaborative Filtering
+
+This project will use the Jester5k data and evaluate Item-based and User-Based Collaboration Filtering recommendation algorithms.
+
+The data `Jester5k` contains 100 jokes with ratings from -10 to 10. There are 5000 users and all have at least rated 36 jokes.
+
+
+```{r, echo=FALSE, message=FALSE}
+library(recommenderlab)
+library(ggplot2)
+library(knitr)
+```
+
+### Load and Explore the data
+
+```{r}
+data("Jester5k")
+Jester5k
+dim(Jester5k)
+
+```
+
+This is a realRatingsMatrix as per the recommenderlab and contains sparse ratings within the matrix.
+
+Let's create histogram of jokes that are already rated.
+
+```{r}
+# convert to vector
+vr <- as.vector(Jester5k@data)
+# do not include ratings with zeros
+vr <- vr[vr != 0]
+hist(vr, breaks = 20, 
+     col="#618685", 
+     xlab="Score", ylab = "Frequency", 
+     main = "Histogram of Ratings")
+length(vr)
+
+```
+
+
+Out of 500,000 possible ratings, only 361,047 have been rated.  That is 25% ratings are NA.  
+Let's further refine the data to select records so that jokes that have been read only few times will not be biased and users who have rated very few ratings are accounted for unbiases.
+
+We will normalize the data so there is less bias in the rating system.  That is taking the z-score of each rating for each row.
+
+```{r}
+# normalize data
+r <- normalize(Jester5k)
+hist(getRatings(r), breaks = 20, 
+     col="#36486b", 
+     xlab="Score", ylab = "Frequency", 
+     main = "Ratings Normalized")
+
+```
+
+### Evaluate Item-Based and User-Based Recommendations
+
+#### Run Model on Full Test data
+
+Let's check how the ratings distribute on full test data on the model created with training data above.
+
+```{r}
+
+set.seed(6432)
+trainIndex <- sample(x = c(TRUE,FALSE), size = nrow(Jester5k), replace=TRUE, prob=c(0.9,0.1))
+jtrain <- Jester5k[trainIndex]
+jtest <- Jester5k[!trainIndex]
+jtest <- jtest[rowCounts(jtest) < 90,]
+
+```
+
+#### Build different recommendation models
+
+First create model with training dataset (normalized) and then run the model against the first 4 users in the test data.  We will evaluate top 5 jokes recommended by each method.
+
+```{r}
+#Item-based collaborative filtering with cosine
+rec_model_ib_co <- Recommender(data = jtrain, method = "IBCF", param=list(normalize = "Z-score",method= "Cosine"))
+
+#Item-based collaborative filtering with pearson
+rec_model_ib_pr <- Recommender(data = jtrain, method = "IBCF", param=list(normalize = "Z-score",method= "Pearson"))
+
+#User-based collaborative filtering with cosine
+rec_model_ub_co <- Recommender(data = jtrain, method = "UBCF", param=list(normalize = "Z-score",method= "Cosine"))
+
+#User-based collaborative filtering with pearson
+rec_model_ub_pr <- Recommender(data = jtrain, method = "UBCF", param=list(normalize = "Z-score",method= "Pearson"))
+
+
+
+```
+
+Most ratings are rated fewer than 2 times or less.  
+
+```{r}
+
+# get top 5 recommendations first 4 users
+rec_pred_ib_co <- predict(rec_model_ib_co, jtest[1:4], n=5)
+rec_pred_ib_pr <- predict(rec_model_ib_pr, jtest[1:4], n=5)
+rec_pred_ub_co <- predict(rec_model_ub_co, jtest[1:4], n=5)
+rec_pred_ub_pr <- predict(rec_model_ub_pr, jtest[1:4], n=5)
+
+
+print("Item-Based Cosine")
+as(rec_pred_ib_co,"list")
+
+print("Item-Based Pearson")
+as(rec_pred_ib_pr,"list")
+
+print("User-Based Cosine")
+as(rec_pred_ub_co,"list")
+
+print("User-Based Pearson")
+as(rec_pred_ub_pr,"list")
+
+```
+
+Surprisngly, all four methods recommend different jokes for the first 4 users. I would have expected some similarity.
+
+Let's run model on full test data.
+```{r}
+rec_pred_ib_co <- predict(rec_model_ib_co, jtest, n=5)
+rec_pred_ib_pr <- predict(rec_model_ib_pr, jtest, n=5)
+rec_pred_ub_co <- predict(rec_model_ub_co, jtest, n=5)
+rec_pred_ub_pr <- predict(rec_model_ub_pr, jtest, n=5)
+
+rec_mtx_ib_co <- sapply(rec_pred_ib_co@items, function(x){
+ colnames(Jester5k)[x]
+})
+
+rec_mtx_ib_pr <- sapply(rec_pred_ib_pr@items, function(x){
+ colnames(Jester5k)[x]
+})
+
+rec_mtx_ub_co <- sapply(rec_pred_ub_co@items, function(x){
+ colnames(Jester5k)[x]
+})
+
+rec_mtx_ub_pr <- sapply(rec_pred_ub_pr@items, function(x){
+ colnames(Jester5k)[x]
+})
+
+number_of_ibcf_cos_items <- factor(table(rec_mtx_ib_co))
+number_of_ibcf_prs_items <- factor(table(rec_mtx_ib_pr))
+number_of_ubcf_cos_items <- factor(table(rec_mtx_ub_co))
+number_of_ubcf_prs_items <- factor(table(rec_mtx_ub_pr))
+
+qplot(number_of_ibcf_cos_items, main = "IBCF-Cosine Histogram")
+qplot(number_of_ibcf_prs_items, main = "IBCF-Pearson Histogram")
+qplot(number_of_ubcf_cos_items, main = "UBCF-Cosine Histogram")
+qplot(number_of_ubcf_prs_items, main = "UBCF-Pearson Histogram")
+
+```
+
+From the histograms of Jester rating counts, item-based have more jokes rated (ie: more than once) than user-based algorithms.
+
+### Top Jokes Recommended
+
+
+```{r}
+top_5_ibcf_co <- head(sort(number_of_ibcf_cos_items, decreasing = TRUE), n=5)
+top_5_ibcf_pr <- head(sort(number_of_ibcf_prs_items, decreasing = TRUE), n=5)
+top_5_ubcf_co <- head(sort(number_of_ubcf_cos_items, decreasing = TRUE), n=5)
+top_5_ubcf_pr <- head(sort(number_of_ubcf_prs_items, decreasing = TRUE), n=5)
+
+top5_table <- data.frame(names(top_5_ibcf_co), top_5_ibcf_co,
+                         names(top_5_ibcf_pr), top_5_ibcf_pr,
+                         names(top_5_ubcf_co), top_5_ibcf_co,
+                         names(top_5_ubcf_pr), top_5_ubcf_pr
+                         )
+rownames(top5_table) <- NULL
+colnames(top5_table) <- c("IBCF_CO","IBCF_CO_CNT",
+                          "IBCF_PR","IBCF_PR_CNT",
+                          "UBCF_CO","UBCF_CO_CNT",
+                          "UBCF_PR","UBCF_PR_CNT")
+top5_table
+
+```
+
+Top jokes recommended by each algorithm do not overlap with each other.  The highest jokes are rated less than 200 times out of 5000 users.  
+
+This concludes evaluation of IBCF and UBCF algorithms used for Jester5k.
+
+
+***
