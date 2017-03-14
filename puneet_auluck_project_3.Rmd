@@ -1,0 +1,165 @@
+---
+title: "DATA 643 Recommender System - Project #3"
+author: "Puneet Auluck"
+date: "March 13, 2017"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+This recommender system will use MovieLense data from `recommenderlab` package. 
+
+
+```{r, echo=FALSE, message=FALSE}
+library(recommenderlab)
+library(dplyr)
+library(irlba)
+library(ggplot2)
+```
+
+#### Load data
+
+```{r}
+data("MovieLense")
+movies <- as.matrix(MovieLense@data)
+```
+
+
+#### Let's explore the data
+```{r}
+dim(movies)
+
+```
+
+
+#### Check sparsity of the data
+
+```{r}
+length(movies[movies==0]) / (ncol(movies)*nrow(movies))
+```
+
+The matrix is 93% sparse, meaning only 7% of entries are populated with ratings.
+
+
+#### Find universal mean
+
+The dataset will be normalized taking standard score using universal mean after SVD matrix is created.
+
+```{r}
+
+moviesWithNA <- movies
+is.na(moviesWithNA) <- moviesWithNA == 0
+universalMean <- mean(moviesWithNA, na.rm=T)
+
+```
+
+
+
+#### Use SVD technique to decompose movies matrix
+
+Our goal will be to reduce `movies` matrix and eliminate the less important attributes to make accurate predictions. 
+
+Singular value decomposition is defined as
+
+$M = U  \Sigma  V^T$
+
+where M is `mxn`, U is `mxr`, $\Sigma$ is `rxr` and $V^T$ is `rxn`.
+
+When we set rank to r, it is full rank but when we set rank to k where `k<r`, we get reduced matrix:
+
+$A_k = U_k  S_k  V_k^T$
+
+The item profile is defined as: $U_k\sqrt{\Sigma_k}$
+
+The user profile is defined as: $\sqrt{\Sigma_k}V_k^T$
+
+The item-user profile is defined as: $U_k\sqrt{\Sigma_k}\sqrt{\Sigma_k}V_k^T$
+
+Also, to determine how well the predictions were made, we define RMSE as
+
+RMSE = $\sqrt{\frac{1}{N} \Sigma (r_i - \hat{r_i})^2}$
+
+```{r}
+
+RMSE <- function(svdmtx){
+  N <- nrow(svdmtx)*ncol(svdmtx)
+  sse <- sum((svdmtx - movies)^2)
+  rv <- sqrt(sse)/N
+  return(rv)
+}
+  
+```
+
+Let us begin by setting k= 100 and plot it.
+
+```{r}
+decomp <- irlba(movies, nv=100)
+results <- cbind.data.frame(c(1:100), decomp$d)
+colnames(results) <- c("rank","singular_value")
+ggplot(results, aes(rank, singular_value) )+ geom_point()
+#plot(c(1:100),decomp$d)
+
+```
+
+It appears most imporant features are captured within 35 singular values.  Let's run SVD with k=35.
+
+```{r}
+
+decomp35 <- irlba(movies, nv=35)
+sigma <- decomp35$d
+results <- cbind.data.frame(c(1:35), decomp35$d)
+colnames(results) <- c("rank","singular_value")
+ggplot(results, aes(rank, singular_value) )+ geom_point()
+
+```
+
+
+Calculate the item-profile matrix
+
+```{r}
+
+movieSVD <- universalMean + (decomp35$u %*% sqrt(sigma)) %*% (sqrt(sigma) %*% t(decomp35$v))
+colnames(movieSVD) <- colnames(movies)
+rownames(movieSVD) <- rownames(movies)
+
+RMSE(movieSVD)
+
+decomp20 <- irlba(movies, nv=20)
+sigma <- decomp20$d
+
+movieSVD <- universalMean + (decomp20$u %*% sqrt(sigma)) %*% (sqrt(sigma) %*% t(decomp20$v))
+colnames(movieSVD) <- colnames(movies)
+rownames(movieSVD) <- rownames(movies)
+
+RMSE(movieSVD)
+
+
+```
+
+#### Evaluate Built-in IBCF and UBCF Recommenders
+
+Let us evaluate and compare RMSE values with built-in recommender methods
+
+```{r}
+moviesEval <- as(movies, "realRatingMatrix")
+eval_sets <- evaluationScheme(data = moviesEval, method = "split", train = 0.9, given = 20, goodRating = 3, k = 1)
+
+#IBCF
+eval_recommender <- Recommender(data = getData(eval_sets, "train"), method = "IBCF", parameter = NULL)
+eval_prediction <- predict(object = eval_recommender, newdata = getData(eval_sets, "known"), n = 10, type = "ratings")
+calcPredictionAccuracy(x = eval_prediction, data = getData(eval_sets, "unknown"), byUser = FALSE)
+
+#UBCF
+eval_recommender <- Recommender(data = getData(eval_sets, "train"), method = "UBCF", parameter = NULL)
+eval_prediction <- predict(object = eval_recommender, newdata = getData(eval_sets, "known"), n = 10, type = "ratings")
+calcPredictionAccuracy(x = eval_prediction, data = getData(eval_sets, "unknown"), byUser = FALSE)
+
+
+
+```
+
+The prediction created from SVD appears to be the least, followed by UBCF method.  The IBCF method used from 'recommenderlab` produced the largest RMSE value.
+
+***
