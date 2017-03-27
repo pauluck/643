@@ -1,0 +1,213 @@
+---
+title: 'DATA 643 Recommender System - Project #4'
+author: "Puneet Auluck"
+date: "March 25, 2017"
+output:
+  word_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+In this project, recommender system performance will be compared using `recommenderlab` and `sparklyr` in R.  The recommender system will be based on MoviewLense database on movie ratings.  We will employ ALS algorithsm for matrix factorization.  
+
+
+```{r, echo=FALSE, message=FALSE}
+library(recommenderlab)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(knitr)
+```
+
+#### Load data
+
+```{r}
+data("MovieLense")
+movies <- as.matrix(MovieLense@data)
+#movies <- movies[1:100,]
+```
+
+
+#### Let's explore the data
+```{r}
+dim(movies)
+
+```
+
+## Build Reccommender system - reccommenderlab - ALS
+
+```{r}
+# Convert matrix to realRatingMatrix
+moviesEval <- as(movies, "realRatingMatrix")
+
+# Set training and test data
+eval_sets <- evaluationScheme(data = moviesEval, method = "split", train = 0.9, given = 20, goodRating = 3, k = 1)
+
+# set up start time
+
+timeit <- proc.time()
+
+# Run ALS recommender algorithm on training data
+eval_recommender <- Recommender(data = getData(eval_sets, "train"), method = "ALS", 
+                                parameter = list(normalize=NULL, lambda=0.1, n_factors=10, 
+                                                 n_iterations=10, seed = NULL, verbose = FALSE))
+r_modelCreationTime <- proc.time() - timeit
+
+timeit <- proc.time()
+
+# predict test values
+eval_prediction <- predict(object = eval_recommender, newdata = getData(eval_sets, "known"), type = "ratings")
+
+r_predictionCreationTime <- proc.time() - timeit
+
+# check the accuracy of the model
+r_rmse <- calcPredictionAccuracy(x = eval_prediction, data = getData(eval_sets, "unknown"), byUser = FALSE)
+
+
+```
+
+
+## Build Reccommender system - sparklyr - ALS 
+
+#### Reshape Movies data
+
+```{r}
+
+user <- as.numeric(rownames(movies))
+movie_names <- colnames(movies)
+colnames(movies) <- c(1:1664)
+movies_with_users <- cbind.data.frame(user, movies, stringsAsFactors=F)
+
+movies_gathered <- as.data.frame(movies_with_users) %>% gather("item","rating",2:1665)
+movies_gathered$item <- as.numeric(movies_gathered$item)
+
+head(movies_gathered)
+
+```
+
+
+#### Set up Spark
+
+```{r}
+
+library(sparklyr)
+sc <- spark_connect(master = "local", version = "2.1.0")
+
+```
+
+#### Load data to Spark
+
+```{r}
+
+movies_tbl <- copy_to(sc, movies_gathered, overwrite = TRUE)
+
+```
+
+
+#### Partitions data
+
+```{r}
+
+timeit <- proc.time()
+partition_movies <- sdf_partition(movies_tbl, training = 0.9, testing = 0.1)
+s_dataLoadTime <- proc.time() - timeit
+
+```
+
+#### Create model and predictions using MLib Matrix Factorization Algorithm
+
+```{r}
+
+timeit <- proc.time()
+
+model <- partition_movies$testing %>% 
+         ml_als_factorization(itr.max=30, regularization.parameter = 0.1)
+
+s_modelCreationTime <- proc.time() - timeit
+
+timeit <- proc.time()
+predictions <- model$.model %>% invoke("transform", spark_dataframe(partition_movies$test)) %>% collect()
+s_predictionCreationTime <- proc.time() - timeit
+
+head(predictions)
+
+# calculate error (from lecture video)
+prediction_ratings_diff_sqrd <- (predictions$prediction - predictions$rating)**2
+spark_rmse <- sqrt(mean(prediction_ratings_diff_sqrd))
+
+```
+
+## Evaluate Error Measures
+
+```{r}
+spark_rmse
+r_rmse
+```
+
+<b>The RMSE error in MLib ALS algorithm in `Spark` has much lower rate than in `recommenderlab`.</b>
+
+## Display Performance Times
+
+
+```{r echo=FALSE}
+
+s_times <- rbind.data.frame(c("Model Creation Time", s_modelCreationTime[1:3]),
+                          c("Prediction Creation Time", s_predictionCreationTime[1:3]),
+                          c("Data Load Time",s_dataLoadTime[1:3]), stringsAsFactors = F)
+colnames(s_times) <- c("process","user","system","elapsed")
+s_times$user <- as.numeric(s_times$user)
+s_times$system <- as.numeric(s_times$system)
+s_times$elapsed <- as.numeric(s_times$elapsed)
+
+r_times <- rbind.data.frame(c("Model Creation Time", r_modelCreationTime[1:3]),
+                          c("Prediction Creation Time", r_predictionCreationTime[1:3]),
+                          c("Data Load Time",c(0,0,0)), stringsAsFactors = F)
+colnames(r_times) <- c("process","user","system","elapsed")
+r_times$user <- as.numeric(r_times$user)
+r_times$system <- as.numeric(r_times$system)
+r_times$elapsed <- as.numeric(r_times$elapsed)
+
+
+rl <- r_times %>% mutate("Package" = "recommenderlab") %>% gather("type","time", 2:4) 
+sk <- s_times %>% mutate("Package" = "sparklyr") %>% gather("type","time", 2:4) 
+
+timedb <- rbind.data.frame(rl, sk)
+
+```
+
+
+
+```{r}
+kable(timedb)
+
+```
+
+
+
+```{r echo=FALSE}
+dl <- timedb %>% filter(process == "Data Load Time")
+mc <- timedb %>% filter(process == "Model Creation Time")
+pc <- timedb %>% filter(process == "Prediction Creation Time")
+
+c <- ggplot(dl, aes(type,time)) + geom_bar(stat = "identity")
+c + facet_wrap(~Package) + ggtitle("Data Load Time")
+
+c <- ggplot(mc, aes(type,time)) + geom_bar(stat = "identity")
+c + facet_wrap(~Package) + ggtitle("Model Creation Time")
+
+c <- ggplot(pc, aes(type,time)) + geom_bar(stat = "identity")
+c + facet_wrap(~Package) + ggtitle("Prediction Creation Time")
+
+```
+
+
+<b>There is no data load time when working straight in `R` as it was loading when `recommenderlab` package was downloaded.  However, it takes few seconds to load the whole data in `Spark`.</b>
+
+<b>Creating model based on ALS did not take as long in `R` as it did in `Spark`.  </b>
+
+<b>The delays in loading the data and creating model is `Spark` was worth it because the predictions were returned in no time whereas it takes more than few minutes getting predictions in `R` which is taxing on the CPU or the system.</b>
+
+***
