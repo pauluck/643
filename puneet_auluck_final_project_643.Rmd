@@ -1,0 +1,312 @@
+---
+title: "DATA 643 - Final Project"
+author: "Puneet Auluck"
+date: "May 15, 2017"
+output:
+  html_document:
+   toc: true
+   toc_float: true
+---
+
+### Project Description
+
+####  Hybrid Recommendation System - MovieLens Data
+
+Up until now, the recommendation algorithms I have worked with were only based on Collaborative Filtering on ratings.  I would like to include content-based recommendation that may improve the recommendations from previous algothrims.
+
+My hybrid approach will use both collaborative and content-based methods.  I will be using collobrative filtering on Movie ratings to get top 10 movies for a user.  Then, I will futher augment the 10 rated movies with the preference of tags user has using tag data.  Movies will be filtered down to only those that have been rated more than 500 times.
+
+### Explore Data Sets
+
+Load Necessary libraries
+
+```{r}
+library(dplyr)
+library(reshape2)
+library(sqldf)
+library(tidytext)
+library(recommenderlab)
+library(sparklyr)
+library(knitr)
+```
+
+
+#### Movie Data
+<b>Data:</b> MovieLens + IMDb/Rotten Tomatoes, 
+https://grouplens.org/datasets/hetrec-2011/
+
+<b>Number of Users:</b> 2113
+<b>Number of Movies:</b> 10197
+
+```{r}
+user_count <- 2113
+movie_count <- 10197
+```
+
+#### Movie Tag Data
+
+```{r}
+# tags
+tags <- read.csv('tags.dat', sep='\t')
+head(tags)
+nrow(tags)
+```
+
+There are 13,222 tags in total that can be associated to a movie!  Most of these tags have not been tagged by users.  We will further refine this data to tags that only users in the database have tagged.
+
+```{r}
+# movie tag data
+movie_tags <- read.csv('movie_tags.dat', sep='\t')
+head(movie_tags)
+summary(movie_tags)
+
+# movies data
+movies <- read.csv('movies.dat', sep='\t')
+head(movies)
+total_movies <- nrow(movies)
+
+# Number of movies tagged
+movies_tagged <- length(unique(movie_tags$movieID))
+
+# check sparsity in tags
+movies_tagged/total_movies
+
+```
+
+The maximum tags associated with a movie is total of 42 while most of the movies on average are tagged once.
+
+
+There are total of 10,197 movies in the matrix. Roughly 70% of the movies are tagged and 30% have no associations.
+
+#### User Tag Data
+
+```{r}
+# movie tag data
+utp_data <- read.csv('user_taggedmovies.dat', sep='\t')
+head(utp_data)
+summary(utp_data)
+
+top10tags <- as.data.frame(head(sort(table(utp_data$tagID), decreasing = TRUE),10), stringsAsFactors = FALSE)
+top10tags$Var1 <- as.numeric(top10tags$Var1)
+
+tagNames <- list()
+
+for(i in 1:10){
+  tagNames[i] <- as.character(tags[top10tags[i,1],2])
+}
+top10tags <- cbind.data.frame(top10tags,unlist(tagNames), stringsAsFactors = FALSE)                   
+colnames(top10tags) <- c("tagID","Freq","tagName")
+
+library(ggplot2)
+ggplot(top10tags, aes(tagName,Freq)) + geom_bar(stat="identity") + coord_flip()
+
+```
+
+
+
+#### Movie Ratings data
+
+```{r}
+# user rated movies
+user_rated_movies <- read.csv('user_ratedmovies.dat', sep='\t')
+head(user_rated_movies)
+summary(user_rated_movies)
+
+
+
+```
+
+```{r}
+ggplot2::qplot(user_rated_movies$rating, geom="histogram")
+
+```
+
+Minimum rating is 0.5 and maximum is 5.0.  Average ratings on higher end between 3 and 4.
+
+#### Check the Sparasity of Ratings Data
+
+```{r}
+possible_ratings <- user_count * movie_count
+rated <- nrow(user_rated_movies)
+
+rated
+possible_ratings
+
+rated/possible_ratings
+
+```
+
+There are roughly 860,000 movies rated out of 21 million possible ratings.  As you can see, the data is very sparse and only 4% has ratings.
+
+
+#### Load data to create matrices
+
+```{r}
+# read all data sets again
+
+mtp_data <- read.csv('movie_tags.dat', sep='\t')
+utp_data <- read.csv('user_taggedmovies.dat', sep='\t')
+umr_data <- read.csv('user_ratedmovies.dat', sep='\t')
+tags <- read.csv('tags.dat', sep='\t') 
+movies <- read.csv('movies.dat', sep='\t')[,1:2]
+movies$title <- as.character(movies$title)
+
+
+
+###### --- U X M (user-movie ratings), finds tag preferences to users ---####
+umr_long <- umr_data %>% select(userID, movieID, rating)# %>%
+
+mtp_long <- mtp_data %>% select(movieID, tagID, tagWeight)
+
+utp_long <- utp_data %>% select(userID, tagID)  %>% 
+            group_by(userID, tagID) %>% 
+            summarise(n = n())
+
+
+```
+
+
+### Create Movie-Tag Matrix 
+
+#### Used for Content
+
+It appears that many words occur rarely and fewer words are tagged more often.  We will employ `tf-idf` to 
+find the important tags by decreasing the weight for tags used more often.  The following is the equation for
+tf-idf but We will use the bind_td_idf from the `tidytext` package.
+
+![](tfidf.png)
+
+```{r}
+# select data only needed
+mtp_pr <- sqldf("SELECT mtp_long.movieID, mtp_long.tagID, mtp_long.tagWeight FROM mtp_long")
+
+# filter to only tags that exist in user tag db as well
+mtp_pr <- sqldf("SELECT * from mtp_pr where
+                tagID in (select tagID from utp_long)")
+
+# calculate tf-idf
+mtp_pr <- mtp_pr %>% bind_tf_idf(movieID, tagID, tagWeight) %>% select(movieID, tagID, tf_idf)
+
+# reshape data in wide-format
+mtp <- dcast(mtp_pr, movieID ~ tagID)
+rownames(mtp) <- mtp[,1]
+mtp <- within(mtp, rm(movieID))
+mtp[is.na(mtp)] <- 0
+
+dim(mtp)
+kable(mtp[1:5,1:20])
+
+
+```
+
+### Create User-Tag Matrix
+
+```{r}
+
+# select tags only that exists in movie db
+utp_pr <- sqldf("SELECT utp_long.userID, utp_long.tagID, utp_long.n from utp_long
+             WHERE utp_long.tagID in (select tagID from mtp_pr)")
+
+utp_users <- as.data.frame(unique(utp_pr$userID))
+colnames(utp_users) <- "userID"
+
+# reshape data in wide-format
+utp<- dcast(utp_pr, userID ~ tagID)
+rownames(utp) <- utp[,1]
+utp <- within(utp, rm(userID))
+utp[is.na(utp)] <- 0
+
+dim(utp)
+kable(utp[1:5,1:10])
+
+```
+
+### Create User-Movie Matrix
+
+```{r}
+
+# cut down number of movies and consider only that have been rated more than 500 times
+umr_movies <- sqldf("SELECT DISTINCT umr_long.movieID, count(*) from umr_long
+                     WHERE umr_long.MovieID IN (SELECT DISTINCT mtp_long.movieID from mtp_long)
+                     AND umr_long.userID in (SELECT DISTINCT utp_long.userID from utp_long)
+                     GROUP BY umr_long.movieID 
+                     HAVING count(*) > 500")
+
+umr_movies <- as.data.frame(unique(umr_movies$movieID))
+colnames(umr_movies) <- "movieID"
+
+umr_pr <- sqldf("SELECT * from umr_long
+                WHERE umr_long.movieID in (SELECT movieID from umr_movies)
+                AND umr_long.userID in (SELECT userID from utp_users)")
+
+
+umr<- dcast(umr_pr, userID ~ movieID)
+rownames(umr) <- umr[,1]
+umr <- within(umr, rm(userID))
+
+dim(umr)
+kable(umr[1:5,1:10])
+
+```
+
+### User-Movie Rating Predictions - IBCF
+
+```{r}
+
+# convert matrix
+umr_matrix <- as(as.matrix(umr), "realRatingMatrix")
+
+# run recommenderlab builtin function
+recsys <- Recommender(data = umr_matrix, method = "IBCF", parameter = list(method = "Cosine"))
+recsysTop5 <- predict(object = recsys, newdata = umr_matrix, n = 5)
+top5items <- recsysTop5@items
+
+head(top5items, n=5)
+
+```
+
+### Evaluate
+
+```{r}
+eval_sets <- evaluationScheme(data = umr_matrix, method = "split", train = 0.7, given = 1, goodRating = 3, k = 1)
+
+#IBCF
+eval_recommender <- Recommender(data = getData(eval_sets, "train"), method = "IBCF", parameter = NULL)
+eval_prediction <- predict(object = eval_recommender, newdata = getData(eval_sets, "known"), n = 10, type = "ratings")
+calcPredictionAccuracy(x = eval_prediction, data = getData(eval_sets, "unknown"), byUser = FALSE)
+
+```
+
+### Add Tag Weights (Content-Based)
+
+Let's explore recommendation for the first user.  We will take these recommendations and find their weight using the Movie-Tag and User-Tag Matrix.
+
+```{r}
+
+user_one <- top5items[1]
+mtp_rows<- which(rownames(mtp) %in% as.character(unlist(user_one)))
+mtp_selected_rows <- mtp[mtp_rows,]
+
+# get user weight
+userweight <- utp["78",]
+
+# multiply the movie tag weight with user tag column
+finalresults <- as.matrix(mtp_selected_rows) %*% t(as.matrix(userweight))
+
+# sort the results
+finalmovies <- as.vector(rownames(finalresults))
+
+user_results <- movies %>% filter(id %in% finalmovies) %>% select(title)
+colnames(user_results) <- c("Top 5 Movies")
+
+user_results
+
+
+
+```
+
+### Conclusion
+From working on this project, the most challenging part I found was setting up data.  Total of 90% of my time was consumed by how I should lay out the matrices so the rows and columns of movies and tags align.  If I had filtered out movies from the movie-tag profile then I would have to update both ratings and user tag matrices.  Working with 3 matrices to create subsets were not easy and I believe there is still lot more work involved in getting the data right.  
+As for making predictions, since algorithms were available to us, it was not as consuming to make predictions on ratings and then incorporate them with weight of tags.
+
+****
